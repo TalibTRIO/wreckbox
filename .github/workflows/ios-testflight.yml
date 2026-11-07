@@ -1,0 +1,79 @@
+# Builds the iPhone player (ios/WreckBoxPlayer.xcodeproj) and uploads it to TestFlight.
+# Run it from the Actions tab ("ios-testflight" → Run workflow) or push a tag like ios-v0.1.0.
+# Signing is automatic: Xcode creates / downloads the certificate and profiles through the App Store Connect API key.
+#
+# Secrets (repo Settings → Secrets and variables → Actions):
+#   ASC_KEY_ID          App Store Connect API key ID (e.g. 2X9R4HXF34)
+#   ASC_ISSUER_ID       Issuer ID shown above the keys list (a UUID)
+#   ASC_KEY_P8_B64      base64 of the downloaded AuthKey_<id>.p8 file
+# The key needs the Admin role so it may create the cloud-managed distribution certificate.
+
+name: ios-testflight
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["ios-v*"]
+
+env:
+  TEAM_ID: 98L83KJCU8
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project ios/WreckBoxPlayer.xcodeproj
+
+      - name: App Store Connect key
+        env:
+          KEY_B64: ${{ secrets.ASC_KEY_P8_B64 }}
+        run: |
+          echo "$KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+          </dict>
+          </plist>
+          EOF
+
+      # Every upload needs a new build number; the run number always goes up.
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -project ios/WreckBoxPlayer.xcodeproj \
+            -scheme WreckBoxPlayer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/WreckBoxPlayer.xcarchive" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            DEVELOPMENT_TEAM=$TEAM_ID \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+
+      - name: Upload to TestFlight
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/WreckBoxPlayer.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+
+      - name: Remove key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"

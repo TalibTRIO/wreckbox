@@ -1,12 +1,18 @@
 # Builds the iPhone player (ios/WreckBoxPlayer.xcodeproj) and uploads it to TestFlight.
 # Run it from the Actions tab ("ios-testflight" → Run workflow) or push a tag like ios-v0.1.0.
-# Signing is automatic: Xcode creates / downloads the certificate and profiles through the App Store Connect API key.
+#
+# Signing is manual with a fixed Apple Distribution certificate and App Store profiles (automatic signing on a fresh
+# runner makes a new development certificate every run and then fails to get a profile). The project itself stays on
+# automatic signing for local Xcode builds; this job switches the two targets to manual just for the archive.
 #
 # Secrets (repo Settings → Secrets and variables → Actions):
-#   ASC_KEY_ID          App Store Connect API key ID (e.g. 2X9R4HXF34)
-#   ASC_ISSUER_ID       Issuer ID shown above the keys list (a UUID)
-#   ASC_KEY_P8_B64      base64 of the downloaded AuthKey_<id>.p8 file
-# The key needs the Admin role so it may create the cloud-managed distribution certificate.
+#   ASC_KEY_ID              App Store Connect API key ID (Team key, Admin) — used for the upload
+#   ASC_ISSUER_ID           Issuer ID shown above the keys list (a UUID)
+#   ASC_KEY_P8_B64          base64 of the downloaded AuthKey_<id>.p8 file
+#   IOS_DIST_P12_B64        base64 of the Apple Distribution certificate + private key (.p12)
+#   IOS_DIST_P12_PASSWORD   the .p12 password
+#   IOS_PROFILE_APP_B64     base64 of the "WreckBox Player App Store" profile (com.talibahmed.wreckbox.player)
+#   IOS_PROFILE_WIDGET_B64  base64 of the "WreckBox Widget App Store" profile (com.talibahmed.wreckbox.player.widget)
 #
 # When a step fails, its error lines are added as annotations, so they show on the run's summary page.
 
@@ -19,6 +25,10 @@ on:
 
 env:
   TEAM_ID: 98L83KJCU8
+  APP_ID: com.talibahmed.wreckbox.player
+  WIDGET_ID: com.talibahmed.wreckbox.player.widget
+  APP_PROFILE: WreckBox Player App Store
+  WIDGET_PROFILE: WreckBox Widget App Store
 
 jobs:
   testflight:
@@ -32,10 +42,32 @@ jobs:
           xcodebuild -list -project ios/WreckBoxPlayer.xcodeproj
           echo "::notice title=Xcode::$(xcodebuild -version | tr '\n' ' ')"
 
-      - name: App Store Connect key
+      - name: Certificate and profiles
         env:
+          P12_B64: ${{ secrets.IOS_DIST_P12_B64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          APP_PROFILE_B64: ${{ secrets.IOS_PROFILE_APP_B64 }}
+          WIDGET_PROFILE_B64: ${{ secrets.IOS_PROFILE_WIDGET_B64 }}
           KEY_B64: ${{ secrets.ASC_KEY_P8_B64 }}
         run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw=$(openssl rand -hex 16)
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          security set-key-partition-list -S apple-tool:,apple: -k "$kcpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/dist.p12"
+          security find-identity -v -p codesigning "$kc"
+
+          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$dir"
+            echo "$APP_PROFILE_B64" | base64 --decode > "$dir/wreckbox-app.mobileprovision"
+            echo "$WIDGET_PROFILE_B64" | base64 --decode > "$dir/wreckbox-widget.mobileprovision"
+          done
+
           echo "$KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -45,9 +77,35 @@ jobs:
             <key>method</key><string>app-store-connect</string>
             <key>destination</key><string>upload</string>
             <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>automatic</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${APP_ID}</key><string>${APP_PROFILE}</string>
+              <key>${WIDGET_ID}</key><string>${WIDGET_PROFILE}</string>
+            </dict>
           </dict>
           </plist>
+          EOF
+
+      # Each target gets its own profile, which build settings on the command line can't express.
+      - name: Manual signing for the archive
+        run: |
+          python3 - <<'EOF'
+          import os, re
+          p = "ios/WreckBoxPlayer.xcodeproj/project.pbxproj"
+          profiles = {os.environ["APP_ID"]: os.environ["APP_PROFILE"], os.environ["WIDGET_ID"]: os.environ["WIDGET_PROFILE"]}
+          def sign(m):
+              block = m.group(0)
+              bid = re.search(r"PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);", block)
+              if not bid or bid.group(1) not in profiles:
+                  return block
+              return block.replace("CODE_SIGN_STYLE = Automatic;",
+                  'CODE_SIGN_STYLE = Manual; CODE_SIGN_IDENTITY = "Apple Distribution"; '
+                  f'PROVISIONING_PROFILE_SPECIFIER = "{profiles[bid.group(1)]}";')
+          s, n = re.subn(r"buildSettings = \{[^{}]*\}", sign, open(p).read())
+          open(p, "w").write(s)
+          print("manual signing in", s.count("CODE_SIGN_STYLE = Manual"), "build configurations")
           EOF
 
       # Every upload needs a new build number; the run number always goes up.
@@ -62,10 +120,6 @@ jobs:
             -archivePath "$RUNNER_TEMP/WreckBoxPlayer.xcarchive" \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             DEVELOPMENT_TEAM=$TEAM_ID \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
-            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
             2>&1 | tee "$RUNNER_TEMP/archive.log"; then
             grep -E "error:|ARCHIVE FAILED" "$RUNNER_TEMP/archive.log" | awk '!seen[$0]++' | head -10 \
               | while IFS= read -r l; do echo "::error title=Archive::${l//%/%25}"; done
@@ -79,7 +133,6 @@ jobs:
             -archivePath "$RUNNER_TEMP/WreckBoxPlayer.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" \
-            -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
             -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
@@ -89,6 +142,8 @@ jobs:
             exit 1
           fi
 
-      - name: Remove key
+      - name: Clean up
         if: always()
-        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

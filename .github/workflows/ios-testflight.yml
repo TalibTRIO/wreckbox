@@ -7,6 +7,8 @@
 #   ASC_ISSUER_ID       Issuer ID shown above the keys list (a UUID)
 #   ASC_KEY_P8_B64      base64 of the downloaded AuthKey_<id>.p8 file
 # The key needs the Admin role so it may create the cloud-managed distribution certificate.
+#
+# When a step fails, its error lines are added as annotations, so they show on the run's summary page.
 
 name: ios-testflight
 
@@ -22,12 +24,13 @@ jobs:
   testflight:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Xcode version
         run: |
           xcodebuild -version
           xcodebuild -list -project ios/WreckBoxPlayer.xcodeproj
+          echo "::notice title=Xcode::$(xcodebuild -version | tr '\n' ' ')"
 
       - name: App Store Connect key
         env:
@@ -50,7 +53,8 @@ jobs:
       # Every upload needs a new build number; the run number always goes up.
       - name: Archive
         run: |
-          xcodebuild archive \
+          set -o pipefail
+          if ! xcodebuild archive \
             -project ios/WreckBoxPlayer.xcodeproj \
             -scheme WreckBoxPlayer \
             -configuration Release \
@@ -61,18 +65,29 @@ jobs:
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
+            2>&1 | tee "$RUNNER_TEMP/archive.log"; then
+            grep -E "error:|ARCHIVE FAILED" "$RUNNER_TEMP/archive.log" | awk '!seen[$0]++' | head -10 \
+              | while IFS= read -r l; do echo "::error title=Archive::${l//%/%25}"; done
+            exit 1
+          fi
 
       - name: Upload to TestFlight
         run: |
-          xcodebuild -exportArchive \
+          set -o pipefail
+          if ! xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/WreckBoxPlayer.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
+            2>&1 | tee "$RUNNER_TEMP/export.log"; then
+            grep -E "error:|EXPORT FAILED" "$RUNNER_TEMP/export.log" | awk '!seen[$0]++' | head -10 \
+              | while IFS= read -r l; do echo "::error title=Upload::${l//%/%25}"; done
+            exit 1
+          fi
 
       - name: Remove key
         if: always()

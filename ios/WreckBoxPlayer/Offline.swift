@@ -65,7 +65,7 @@ final class Offline: ObservableObject {
     }
 
     private static func safe(_ s: String) -> String {
-        s.components(separatedBy: CharacterSet(charactersIn: "/\:*?\"<>|\n")).joined(separator: " ")
+        s.components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|\n")).joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
     }
 }

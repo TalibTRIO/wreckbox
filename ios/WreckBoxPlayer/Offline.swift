@@ -15,6 +15,7 @@ final class Offline: ObservableObject {
         var status: Status
         var file: String?
         var bytes: Int = 0
+        var total: Int?
         var error: String?
         var at: Date = Date()
         var id: String { track.key }
@@ -47,7 +48,43 @@ final class Offline: ObservableObject {
     func isWorking(_ t: Track) -> Bool { entries[t.key]?.status == .downloading }
 
     /// Only YouTube songs can be fetched; Spotify's are streamed through its page and phone songs are already here.
-    func canSave(_ t: Track) -> Bool { t.source == .youtube && !t.id.isEmpty }
+    func canSave(_ t: Track) -> Bool { t.source == .youtube ? !t.id.isEmpty : t.source == .spotify }
+
+    /// Downloads the song's audio in 1 MB pieces (YouTube's links stall on one big request) to a temp file.
+    private func fetch(_ t: Track) async throws -> URL {
+        var video = t.id
+        if t.source == .spotify {
+            guard let v = await Radio.findOnYouTube(t) else { throw YouTubeStream.Failure.notPlayable("Not found on YouTube Music") }
+            video = v
+        }
+        let s = try await YouTubeStream.resolve(video)
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+        FileManager.default.createFile(atPath: tmp.path, contents: nil)
+        let h = try FileHandle(forWritingTo: tmp)
+        defer { try? h.close() }
+        var pos = 0, total = Int.max
+        while pos < total {
+            var req = URLRequest(url: s.url)
+            req.timeoutInterval = 20 // a link that goes quiet fails instead of showing Downloading forever
+            req.setValue(YouTubeStream.client.userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("bytes=\(pos)-\(pos + 1_048_575)", forHTTPHeaderField: "Range")
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200, !data.isEmpty else {
+                throw YouTubeStream.Failure.badAnswer
+            }
+            try h.write(contentsOf: data)
+            if http.statusCode == 200 { // the server ignored the range and sent everything
+                pos = data.count
+                total = pos
+            } else {
+                pos += data.count
+                if let cr = http.value(forHTTPHeaderField: "Content-Range"), let n = cr.split(separator: "/").last.flatMap({ Int($0) }) { total = n }
+            }
+            entries[t.key]?.bytes = pos
+            entries[t.key]?.total = total == Int.max ? nil : total
+        }
+        return tmp
+    }
 
     func save(_ t: Track) {
         guard canSave(t), !isSaved(t), !isWorking(t) else { return }
@@ -55,10 +92,7 @@ final class Offline: ObservableObject {
         persist()
         Task {
             do {
-                let s = try await YouTubeStream.resolve(t.id)
-                let (tmp, resp) = try await URLSession.shared.download(from: s.url)
-                let code = (resp as? HTTPURLResponse)?.statusCode
-                guard code == 200 || code == 206 else { throw YouTubeStream.Failure.badAnswer }
+                let tmp = try await fetch(t)
                 let ext = "m4a" // only AAC (itag 140 / 139) is asked for
                 // "Artist - Title.m4a": LocalFiles reads title and artist from the name when the file has no tags.
                 let stem = Self.safe([t.artist, t.title].filter { !$0.isEmpty }.joined(separator: " - "))
@@ -155,7 +189,11 @@ struct OfflinePage: View {
     @ViewBuilder private func statusLine(_ e: Offline.Entry) -> some View {
         switch e.status {
         case .downloading:
-            HStack(spacing: 6) { ProgressView().scaleEffect(0.7); Text("Downloading…").font(W.ui(12)).foregroundStyle(W.text3) }
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.7)
+                Text(e.total.map { "Downloading… \(Int(Double(e.bytes) / Double(max($0, 1)) * 100))%" } ?? "Downloading…")
+                    .font(W.ui(12)).foregroundStyle(W.text3)
+            }
         case .saved:
             Label("Available offline · \(String(format: "%.1f", Double(e.bytes) / 1_048_576)) MB", systemImage: "checkmark.circle.fill")
                 .font(W.ui(12)).foregroundStyle(W.text3)

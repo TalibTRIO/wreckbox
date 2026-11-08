@@ -531,6 +531,7 @@ struct NowPlayingPage: View {
     @ObservedObject private var library = Library.shared
     @ObservedObject private var eq = EQ.shared
     @ObservedObject private var nav = Nav.shared
+    @ObservedObject private var offline = Offline.shared
     @Environment(\.dismiss) private var dismiss
     @State private var dragging: Double?
     @State private var pull: CGFloat = 0
@@ -555,6 +556,7 @@ struct NowPlayingPage: View {
                         let shaped = eq.on && eq.preset != "Flat"
                         Pill(label: shaped ? "EQ · \(eq.preset)" : "Equaliser", icon: "slider.vertical.3", style: shaped ? .smart : .glass) { nav.eq = true }
                             .padding(.top, 12)
+                        offlineButton(t).padding(.top, 8)
                         upNext.padding(.top, 8)
                     }
                     .padding(.horizontal, 18).padding(.bottom, 40)
@@ -575,6 +577,23 @@ struct NowPlayingPage: View {
         .preferredColorScheme(.dark)
         .sheet(isPresented: $nav.eq) { EqualiserSheet().presentationDetents([.medium, .large]).presentationBackground(.ultraThinMaterial) }
         .sheet(item: $nav.addTo) { AddToPlaylistSheet(track: $0).presentationDetents([.medium, .large]).presentationBackground(.ultraThinMaterial) }
+    }
+
+    /// Keep the song that is playing offline (or see how its download is going).
+    @ViewBuilder private func offlineButton(_ t: Track) -> some View {
+        if offline.canSave(t) {
+            if offline.isSaved(t) {
+                Pill(label: "Available offline", icon: "checkmark.circle.fill", style: .smart) { offline.remove(t) }
+            } else if offline.isWorking(t) {
+                let e = offline.entry(t)
+                let pct = e?.total.map { " \(Int(Double(e?.bytes ?? 0) / Double(max($0, 1)) * 100))%" } ?? ""
+                Pill(label: "Downloading…\(pct)", icon: "arrow.down.circle", style: .glass) {}
+            } else if offline.entry(t)?.status == .failed {
+                Pill(label: "Retry offline download", icon: "arrow.clockwise", style: .glass) { offline.save(t) }
+            } else {
+                Pill(label: "Keep offline", icon: "arrow.down.circle", style: .glass) { offline.save(t) }
+            }
+        }
     }
 
     private var header: some View {

@@ -238,7 +238,7 @@ final class Player: ObservableObject {
         changed()
         Task {
             // Kept offline: play the saved file, no connection needed.
-            if t.source == .youtube, let f = Offline.shared.fileURL(t) {
+            if t.source != .local, let f = Offline.shared.fileURL(t) {
                 usePage(false)
                 guard await native.load(f, key: t.key, ends: t.duration), gen == startGen else { return }
                 quality = "AAC · offline"
@@ -387,7 +387,7 @@ final class Player: ObservableObject {
         guard mode == .native, let n = upNext else { return native.unqueue() }
         if native.queuedKey == n.key { return }
         if n.source == .local { Task { await native.queue(LocalFiles.url(n.id), key: n.key, ends: n.duration) }; return }
-        if n.source == .youtube, let f = Offline.shared.fileURL(n) { Task { await native.queue(f, key: n.key, ends: n.duration) }; return }
+        if n.source != .local, let f = Offline.shared.fileURL(n) { Task { await native.queue(f, key: n.key, ends: n.duration) }; return }
         if let id = videoId(n), noDirect.contains(id) { return native.unqueue() }
         Task {
             // Still the next song once the link is here?

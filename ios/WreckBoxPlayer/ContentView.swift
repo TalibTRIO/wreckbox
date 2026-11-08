@@ -323,6 +323,8 @@ struct TrackRow: View {
                 Button("Saving for offline…", systemImage: "arrow.down.circle") {}.disabled(true)
             } else if offline.isSaved(track) {
                 Button("Remove offline copy", systemImage: "xmark.circle") { offline.remove(track) }
+            } else if offline.entry(track)?.status == .failed {
+                Button("Retry offline download", systemImage: "arrow.clockwise") { offline.save(track) }
             } else {
                 Button("Keep offline", systemImage: "arrow.down.circle") { offline.save(track) }
             }

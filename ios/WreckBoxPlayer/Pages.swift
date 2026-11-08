@@ -14,7 +14,7 @@ extension View {
 }
 
 /// Lists of your own songs a page can open.
-enum LibraryList: Hashable { case liked, phone, recent }
+enum LibraryList: Hashable { case liked, phone, recent, offline }
 
 // MARK: - Home
 
@@ -390,6 +390,7 @@ struct SearchPage: View {
 struct PlaylistsPage: View {
     @ObservedObject private var library = Library.shared
     @ObservedObject private var nav = Nav.shared
+    @ObservedObject private var offline = Offline.shared
     @State private var phone = LocalFiles.tracks
     @State private var newPlaylist = false
     @State private var newName = ""
@@ -402,6 +403,7 @@ struct PlaylistsPage: View {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                 bigTile("Liked songs", "\(library.data.likes.count) songs", "heart.fill", library.data.likes.first?.art) { nav.playlistsPath.append(LibraryList.liked) }
                 bigTile("On this phone", "\(phone.count) songs", "iphone", phone.first?.art) { nav.playlistsPath.append(LibraryList.phone) }
+                bigTile("Offline songs", "\(offline.entries.values.filter { $0.status == .saved }.count) saved", "arrow.down.circle.fill", nil) { nav.playlistsPath.append(LibraryList.offline) }
             }
             .padding(.top, 10)
             SectionHeader(title: "Your playlists")
@@ -470,8 +472,13 @@ struct LibraryListPage: View {
     @State private var phone = LocalFiles.tracks
 
     var body: some View {
+        if list == .offline { OfflinePage() } else { listBody }
+    }
+
+    @ViewBuilder private var listBody: some View {
         let (title, tracks, empty): (String, [Track], String) = {
             switch list {
+            case .offline: return ("Offline songs", [], "")
             case .liked: return ("Liked songs", library.data.likes, "Songs you ♥ show up here.")
             case .phone: return ("On this phone", phone, "No songs on this phone yet.")
             case .recent: return ("Recently played", library.data.recent, "Nothing played yet.")

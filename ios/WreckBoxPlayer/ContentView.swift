@@ -246,6 +246,7 @@ struct TrackRow: View {
     var playlist: (id: String, index: Int)?
     var onTap: () -> Void
     @ObservedObject private var player = Player.shared
+    @ObservedObject private var offline = Offline.shared
     @ObservedObject private var library = Library.shared
     @State private var dx: CGFloat = 0
 
@@ -315,6 +316,16 @@ struct TrackRow: View {
         if let p = playlist {
             Divider()
             Button("Remove from playlist", systemImage: "minus.circle", role: .destructive) { library.remove(at: p.index, from: p.id) }
+        }
+        if offline.canSave(track) {
+            Divider()
+            if offline.isWorking(track) {
+                Button("Saving for offline…", systemImage: "arrow.down.circle") {}.disabled(true)
+            } else if offline.isSaved(track) {
+                Button("Remove offline copy", systemImage: "xmark.circle") { offline.remove(track) }
+            } else {
+                Button("Keep offline", systemImage: "arrow.down.circle") { offline.save(track) }
+            }
         }
         if track.source == .local {
             Divider()

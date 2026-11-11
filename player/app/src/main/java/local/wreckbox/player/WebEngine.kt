@@ -141,6 +141,10 @@ open class WebPage(context: Context, val service: Service) {
         @JavascriptInterface
         fun ended(why: String) = main.post { onEnded(why) }
 
+        /** Asked by the page script as it starts: strip YouTube's ads out of its player data? (the Block ads setting) */
+        @JavascriptInterface
+        fun noAds(): Boolean = AdBlock.enabled
+
         @JavascriptInterface
         fun results(json: String) = main.post { onResults(json) }
 
@@ -169,6 +173,28 @@ open class WebPage(context: Context, val service: Service) {
                 Object.defineProperty(document, 'hidden', { get: function () { return false; } });
                 document.addEventListener('visibilitychange', function (e) { e.stopImmediatePropagation(); }, true);
                 window.addEventListener('blur', function (e) { e.stopImmediatePropagation(); }, true);
+              } catch (e) {}
+              // YouTube ads, removed before they exist: the ad schedule rides inside the player's data (the page's first
+              // ytInitialPlayerResponse, then each song's /player answer). Without it the player has no ad to show, so a
+              // song starts at once instead of after an ad is loaded and skipped. The skip in tick() stays as a backup.
+              try {
+                if (yt() && typeof WB !== 'undefined' && WB.noAds && WB.noAds()) {
+                  var AD_KEYS = ['adPlacements', 'playerAds', 'adSlots', 'adBreakHeartbeatParams'];
+                  var prune = function (o) {
+                    if (o && typeof o === 'object' && !Array.isArray(o)) {
+                      for (var i = 0; i < AD_KEYS.length; i++) if (AD_KEYS[i] in o) delete o[AD_KEYS[i]];
+                      if (o.playerResponse) prune(o.playerResponse);
+                    }
+                    return o;
+                  };
+                  var jp = JSON.parse;
+                  JSON.parse = function () { return prune(jp.apply(this, arguments)); };
+                  var rj = Response.prototype.json;
+                  Response.prototype.json = function () { return rj.apply(this, arguments).then(prune); };
+                  var ipr;
+                  Object.defineProperty(window, 'ytInitialPlayerResponse', { configurable: true,
+                    get: function () { return ipr; }, set: function (v) { ipr = prune(v); } });
+                }
               } catch (e) {}
               var last = null, endedFor = null;
               function hook(m) {
@@ -367,6 +393,25 @@ open class WebPage(context: Context, val service: Service) {
                     if ((m && !m.paused) || tries2 > 25) { clearInterval(t2); return; }
                     click('#play-pause-button') || (m && m.play && m.play());
                   }, 800);
+                },
+                // YouTube Music, already open: go to another song inside the page (as tapping a song in it does) instead
+                // of loading the whole site again. If the page didn't move to it within 1.5 s, load it the slow way.
+                go: function (id) {
+                  WBC.hold = false; WBC.expect = null; WBC.itag = 0;
+                  WBC.startedAt = Date.now();
+                  var m0 = media(); if (m0 && !m0.paused) m0.pause(); // the old song stops now, not when the new one loads
+                  var url = '/watch?v=' + encodeURIComponent(id), app = q('ytmusic-app');
+                  var full = function () { location.href = url; };
+                  if (!app) return full();
+                  try {
+                    app.dispatchEvent(new CustomEvent('yt-navigate', { bubbles: true, composed: true, detail: { endpoint: {
+                      commandMetadata: { webCommandMetadata: { url: url, webPageType: 'MUSIC_PAGE_TYPE_WATCH' } },
+                      watchEndpoint: { videoId: id } } } }));
+                  } catch (e) { return full(); }
+                  setTimeout(function () {
+                    if (location.href.indexOf('v=' + id) < 0) return full();
+                    WBC.start();
+                  }, 1500);
                 }
               };
               var ticks = 0, md = { title: '', artist: '', art: '' };
@@ -423,23 +468,42 @@ class WebEngine(context: Context, service: Service, private val state: (WebState
     @Volatile var last = WebState()
         private set
 
+    /** The page has YouTube Music loaded (not parked): a new song can be switched to inside it. */
+    private var siteOpen = false
+
     override fun onState(s: WebState) {
         last = s
+        siteOpen = s.url.startsWith(Service.YOUTUBE.origin)
         state(s)
     }
 
     override fun onEnded(why: String) = ended(why)
 
+    /** Bumped by every play / pause / stop, so a delayed start meant for an earlier request does nothing. */
+    private var gen = 0
+
     fun playTrack(id: String) {
         warmed = true
         important(true)
+        val g = ++gen
+        // YouTube Music already open in the page: switch songs inside it (well under a second) rather than reloading
+        // the whole site (several seconds). The page falls back to a full load by itself if that doesn't take.
+        val live = service == Service.YOUTUBE && siteOpen
         last = WebState()
+        if (live) {
+            js("WBC.go(${JSONObject.quote(id)})")
+            eq(Eq.state.value.effective)
+            if (levelsOn) js("WBC.levels(true)")
+            // Backup: if it still isn't playing (e.g. the page had to fall back to a full load), press play.
+            main.postDelayed({ if (gen == g) js("WBC.start()") }, 4500)
+            return
+        }
         open(when (service) {
             Service.YOUTUBE -> "https://music.youtube.com/watch?v=$id"
             Service.SPOTIFY -> "https://open.spotify.com/track/$id"
         })
         // The page's script starts the track once it's loaded (Spotify waits for a press of its play button).
-        main.postDelayed({ js("WBC.start()"); eq(Eq.state.value.effective); if (levelsOn) js("WBC.levels(true)") }, 2500)
+        main.postDelayed({ if (gen == g) { js("WBC.start()"); eq(Eq.state.value.effective); if (levelsOn) js("WBC.levels(true)") } }, 2500)
     }
 
     fun eq(gains: List<Float>) = js("WBC.eq([${gains.joinToString(",")}])")
@@ -447,10 +511,11 @@ class WebEngine(context: Context, service: Service, private val state: (WebState
     fun levels(on: Boolean) { if (on != levelsOn || on) { levelsOn = on; js("WBC.levels($on)") } }
 
     fun play() { important(true); js("WBC.play()") }
-    fun pause() { js("WBC.pause()"); important(false) }
+    fun pause() { gen++; js("WBC.pause()"); important(false) }
 
     override fun park() {
         last = WebState()
+        siteOpen = false
         warmed = false
         levelsOn = false
         super.park()
@@ -480,6 +545,7 @@ class WebEngine(context: Context, service: Service, private val state: (WebState
     }
 
     fun stop() {
+        gen++
         important(false)
         if (service == Service.SPOTIFY) {
             last = WebState()
